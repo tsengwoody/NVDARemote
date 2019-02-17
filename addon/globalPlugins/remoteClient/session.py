@@ -246,3 +246,34 @@ class MasterSession(RemoteSession):
 		patcher_callbacks = (('braille_input', self.braille_input), ('set_display', self.send_braille_info))
 		for event, callback in patcher_callbacks:
 			self.patcher.unregister_callback(event, callback)
+
+class PublishSession(SlaveSession):
+	"""Session that runs on the publish and manages state."""
+
+	def __init__(self, *args, **kwargs):
+		super(PublishSession, self).__init__(*args, **kwargs)
+		self.transport.callback_manager.unregister_callback('msg_key', self.local_machine.send_key)
+		self.clients = defaultdict(dict)
+
+	def handle_client_connected(self, client=None, **kwargs):
+		super(PublishSession, self).handle_client_connected(client, **kwargs)
+		self.clients[client['id']]['connection_type'] = client['connection_type']
+
+	def handle_client_disconnected(self, client=None, **kwargs):
+		super(PublishSession, self).handle_client_disconnected(client, **kwargs)
+		del self.clients[client['id']]
+
+class SubscribeSession(MasterSession):
+	"""Session that runs on the subscribe and manages state."""
+
+	def __init__(self, *args, **kwargs):
+		super(SubscribeSession, self).__init__(*args, **kwargs)
+		self.clients = defaultdict(dict)
+
+	def handle_client_connected(self, client=None, **kwargs):
+		super(SubscribeSession, self).handle_client_connected(client, **kwargs)
+		self.clients[client['id']]['connection_type'] = client['connection_type']
+
+	def handle_client_disconnected(self, client=None, **kwargs):
+		super(SubscribeSession, self).handle_client_disconnected(client, **kwargs)
+		del self.clients[client['id']]

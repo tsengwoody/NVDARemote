@@ -256,3 +256,143 @@ class OptionsDialog(wx.Dialog):
 			cs['port'] = int(self.port.GetValue())
 		cs['key'] = self.key.GetValue()
 		config.write()
+
+#===== broadcast =====
+class BroadcastClientPanel(wx.Panel):
+
+	def __init__(self, parent=None, id=wx.ID_ANY):
+		super(BroadcastClientPanel, self).__init__(parent, id)
+		sizer = wx.BoxSizer(wx.HORIZONTAL)
+		# Translators: The label of an edit field in connect dialog to enter name or address of the remote computer.
+		sizer.Add(wx.StaticText(self, wx.ID_ANY, label=_("&Server Host:")))
+		self.host = wx.TextCtrl(self, wx.ID_ANY)
+		sizer.Add(self.host)
+		# Translators: Label of the edit field to enter key (password) to secure the remote connection.
+		sizer.Add(wx.StaticText(self, wx.ID_ANY, label=_("&Channel:")))
+		self.key = wx.TextCtrl(self, wx.ID_ANY)
+		sizer.Add(self.key)
+		# Translators: Label of the edit field to enter name to show the client name.
+		sizer.Add(wx.StaticText(self, wx.ID_ANY, label=_("&Name:")))
+		self.name = wx.TextCtrl(self, wx.ID_ANY)
+		sizer.Add(self.name)
+		self.SetSizerAndFit(sizer)
+
+	def on_generate_key(self, evt):
+		evt.Skip()
+		address = socket_utils.address_to_hostport(self.host.GetValue())
+		self.key_connector = transport.RelayTransport(address=address, serializer=serializer.JSONSerializer())
+		self.key_connector.callback_manager.register_callback('msg_generate_key', self.handle_key_generated)
+		t = threading.Thread(target=self.key_connector.run)
+		t.start()
+
+	def handle_key_generated(self, key=None):
+		self.key.SetValue(key)
+		self.key.SetFocus()
+		self.key_connector.close()
+		self.key_connector = None
+
+class BroadcastDirectConnectDialog(wx.Dialog):
+
+	def __init__(self, parent, id, title):
+		super(BroadcastDirectConnectDialog, self).__init__(parent, id, title=title)
+		main_sizer = self.main_sizer = wx.BoxSizer(wx.VERTICAL)
+		choices = [_("Subscribe"), _("Publish")]
+		self.connection_type = wx.RadioBox(self, wx.ID_ANY, choices=choices, style=wx.RA_VERTICAL)
+		self.connection_type.SetSelection(0)
+		main_sizer.Add(self.connection_type)
+		self.container = wx.Panel(parent=self)
+		self.panel = BroadcastClientPanel(parent=self.container)
+		main_sizer.Add(self.container)
+		buttons = self.CreateButtonSizer(wx.OK | wx.CANCEL)
+		main_sizer.Add(buttons, flag=wx.BOTTOM)
+		main_sizer.Fit(self)
+		self.SetSizer(main_sizer)
+		self.Center(wx.BOTH | WX_CENTER)
+		ok = wx.FindWindowById(wx.ID_OK, self)
+		ok.Bind(wx.EVT_BUTTON, self.on_ok)
+
+	def on_client_or_server(self, evt):
+		evt.Skip()
+		self.panel.Destroy()
+		if self.client_or_server.GetSelection() == 0:
+			self.panel = ClientPanel(parent=self.container)
+		else:
+			self.panel = ServerPanel(parent=self.container)
+		self.main_sizer.Fit(self)
+
+	def on_ok(self, evt):
+		if not self.panel.host.GetValue() or not self.panel.key.GetValue():
+			gui.messageBox(_("Both host and key must be set."), _("Error"), wx.OK | wx.ICON_ERROR)
+			self.panel.host.SetFocus()
+		else:
+			evt.Skip()
+
+class InfoPanel(wx.Panel):
+
+	def __init__(self, parent=None, id=wx.ID_ANY, broadcast_info=None):
+		super(InfoPanel, self).__init__(parent, id)
+		sizer = wx.BoxSizer(wx.HORIZONTAL)
+		sizer = wx.BoxSizer(wx.VERTICAL)
+		# Translators: The label of an edit field in connect dialog to show broadcast type.
+		sizer.Add(wx.StaticText(self, wx.ID_ANY, label=_("&broadcast type:")))
+		self.connection_type = wx.TextCtrl(self, wx.ID_ANY, style=wx.TE_READONLY|wx.TE_MULTILINE)
+		sizer.Add(self.connection_type)
+		self.connection_type.SetValue(broadcast_info['connection_type'])
+		# Translators: The label of an edit field in connect dialog to show name or address of the remote computer.
+		sizer.Add(wx.StaticText(self, wx.ID_ANY, label=_("&Server Host:")))
+		self.host = wx.TextCtrl(self, wx.ID_ANY, style=wx.TE_READONLY|wx.TE_MULTILINE)
+		sizer.Add(self.host)
+		self.host.SetValue(broadcast_info['host'])
+		# Translators: Label of the edit field to show key (channel).
+		sizer.Add(wx.StaticText(self, wx.ID_ANY, label=_("&Channel:")))
+		self.key = wx.TextCtrl(self, wx.ID_ANY, style=wx.TE_READONLY|wx.TE_MULTILINE)
+		self.key.SetValue(broadcast_info['key'])
+		sizer.Add(self.key)
+		# Translators: Label of the edit field to enter name to show the client name.
+		sizer.Add(wx.StaticText(self, wx.ID_ANY, label=_("&Name:")))
+		self.name = wx.TextCtrl(self, wx.ID_ANY, style=wx.TE_READONLY|wx.TE_MULTILINE)
+		self.name.SetValue(broadcast_info['name'])
+		sizer.Add(self.name)
+
+		# Translators: Label of the edit field to show the publish client.
+		sizer.Add(wx.StaticText(self, wx.ID_ANY, label=_("&Clients:")))
+		if broadcast_info['connection_type'] == 'publish':
+			#self.publish_clients = wx.TextCtrl(self, wx.ID_ANY, style=wx.TE_READONLY|wx.TE_MULTILINE)
+			#self.publish_clients.SetValue(broadcast_info['publish_clients'])
+			#sizer.Add(self.publish_clients)
+			self.clients = broadcast_info['publish_clients']
+		if broadcast_info['connection_type'] == 'subscribe':
+			#self.subscribe_clients = wx.TextCtrl(self, wx.ID_ANY, style=wx.TE_READONLY|wx.TE_MULTILINE)
+			#self.subscribe_clients.SetValue(broadcast_info['subscribe_clients'])
+			#sizer.Add(self.subscribe_clients)
+			self.clients = broadcast_info['subscribe_clients']
+
+		from gui import nvdaControls
+		self.clientsList = nvdaControls.AutoWidthColumnListCtrl(parent=self, autoSizeColumnIndex=0, style=wx.LC_REPORT | wx.LC_SINGLE_SEL)
+		self.clientsList.InsertColumn(0, _("ID"))
+		self.clientsList.InsertColumn(1, _("Connection type"))
+		sizer.Add(self.clientsList)
+		for key, value in self.clients.items():
+			if value['connection_type'] == 'master':
+				connection_type = 'subscribe'
+			elif value['connection_type'] == 'slave':
+				connection_type = 'publish'
+			else:
+				connection_type = 'unknown'
+			self.clientsList.Append((key, connection_type,))
+
+		self.SetSizerAndFit(sizer)
+
+class BroadcastInfoDialog(wx.Dialog):
+
+	def __init__(self, parent, id, title, broadcast_info=None):
+		super(BroadcastInfoDialog, self).__init__(parent, id, title=title)
+		main_sizer = self.main_sizer = wx.BoxSizer(wx.VERTICAL)
+		self.container = wx.Panel(parent=self)
+		self.panel = InfoPanel(parent=self.container, broadcast_info=broadcast_info)
+		main_sizer.Add(self.container)
+		buttons = self.CreateButtonSizer(wx.OK | wx.CANCEL)
+		main_sizer.Add(buttons, flag=wx.BOTTOM)
+		main_sizer.Fit(self)
+		self.SetSizer(main_sizer)
+		self.Center(wx.BOTH | WX_CENTER)

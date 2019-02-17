@@ -45,6 +45,8 @@ from socket_utils import SERVER_PORT, address_to_hostport, hostport_to_address
 import api
 import ssl
 
+from session import PublishSession, SubscribeSession
+
 class GlobalPlugin(GlobalPlugin):
 	scriptCategory = _("NVDA Remote")
 
@@ -75,6 +77,20 @@ class GlobalPlugin(GlobalPlugin):
 			self.perform_autoconnect()
 		self.sd_focused = False
 
+		#===== broadcast =====
+		self.publish_session = None
+		self.publish_transport = None
+		self.subscribe_session = None
+		self.subscribe_transport = None
+		self.broadcast_info = {
+			'connection_type': '',
+			'host': '',
+			'key': '',
+			'name': '',
+			'publish_clients': str({}),
+			'subscribe_clients': str({}),
+		}
+
 	def perform_autoconnect(self):
 		cs = configuration.get_config()['controlserver']
 		channel = cs['key']
@@ -92,6 +108,25 @@ class GlobalPlugin(GlobalPlugin):
 	def create_menu(self):
 		self.menu = wx.Menu()
 		tools_menu = gui.mainFrame.sysTrayIcon.toolsMenu
+
+		# ===== start broadcast =====
+		# Translators: Item in NVDA Remote submenu to broadcast.
+		self.broadcast_item = self.menu.Append(wx.ID_ANY, _("Broadcast..."), _("Broadcast"))
+		gui.mainFrame.sysTrayIcon.Bind(wx.EVT_MENU, self.do_broadcast, self.broadcast_item)
+		# Translators: Item in NVDA Remote submenu to show broadcast info.
+		self.broadcast_info_item = self.menu.Append(wx.ID_ANY, _("Broadcast Info..."), _("Broadcast Info"))
+		self.broadcast_info_item.Enable(False)
+		gui.mainFrame.sysTrayIcon.Bind(wx.EVT_MENU, self.do_broadcast_info, self.broadcast_info_item)
+		# Translators: Item in NVDA Remote submenu to unpublish.
+		self.unpublish_item = self.menu.Append(wx.ID_ANY, _("Unpublish"), _("Unpublish"))
+		self.unpublish_item.Enable(False)
+		gui.mainFrame.sysTrayIcon.Bind(wx.EVT_MENU, self.on_unpublish_item, self.unpublish_item)
+		# Translators: Item in NVDA Remote submenu to unsubscribe.
+		self.unsubscribe_item = self.menu.Append(wx.ID_ANY, _("Unsubscribe"), _("unsubscribe"))
+		self.unsubscribe_item.Enable(False)
+		gui.mainFrame.sysTrayIcon.Bind(wx.EVT_MENU, self.on_unsubscribe_item, self.unsubscribe_item)
+		# ===== end broadcast =====
+
 		# Translators: Item in NVDA Remote submenu to connect to a remote computer.
 		self.connect_item = self.menu.Append(wx.ID_ANY, _("Connect..."), _("Remotely connect to another computer running NVDA Remote Access"))
 		gui.mainFrame.sysTrayIcon.Bind(wx.EVT_MENU, self.do_connect, self.connect_item)
@@ -119,7 +154,7 @@ class GlobalPlugin(GlobalPlugin):
 		gui.mainFrame.sysTrayIcon.Bind(wx.EVT_MENU, self.on_send_ctrl_alt_del, self.send_ctrl_alt_del_item)
 		self.send_ctrl_alt_del_item.Enable(False)
 		# Translators: Label of menu in NVDA tools menu.
-		self.remote_item=tools_menu.AppendSubMenu(self.menu, _("R&emote"), _("NVDA Remote Access"))
+		self.remote_item=tools_menu.AppendSubMenu(self.menu, _("R&emote and broadcast"), _("NVDA Remote Access"))
 
 	def terminate(self):
 		self.disconnect()
@@ -503,9 +538,128 @@ class GlobalPlugin(GlobalPlugin):
 			return connector.connected
 		return False
 
+	def do_broadcast(self, evt):
+		evt.Skip()
+		last = ''
+		# Translators: Title of the connect dialog.
+		dlg = dialogs.BroadcastDirectConnectDialog(parent=gui.mainFrame, id=wx.ID_ANY, title=_("Broadcast"))
+		def handle_dlg_complete(dlg_result):
+			if dlg_result != wx.ID_OK:
+				return
+			if 0 == 0: #client
+				server_addr = dlg.panel.host.GetValue()
+				server_addr, port = address_to_hostport(server_addr)
+				channel = dlg.panel.key.GetValue()
+				name = dlg.panel.name.GetValue()
+				self.broadcast_info['host'] = server_addr
+				self.broadcast_info['key'] = channel
+				self.broadcast_info['name'] = name
+				if dlg.connection_type.GetSelection() == 0:
+					self.broadcast_info['connection_type'] = 'subscribe'
+					self.connect_as_subscribe((server_addr, port), channel)
+				else:
+					self.broadcast_info['connection_type'] = 'publish'
+					self.connect_as_publish((server_addr, port), channel)
+			else: #We want a server
+				channel = dlg.panel.key.GetValue()
+				self.start_control_server(int(dlg.panel.port.GetValue()), channel)
+				if dlg.connection_type.GetSelection() == 0:
+					self.connect_as_master(('127.0.0.1', int(dlg.panel.port.GetValue())), channel)
+				else:
+					self.connect_as_slave(('127.0.0.1', int(dlg.panel.port.GetValue())), channel)
+		gui.runScriptModalDialog(dlg, callback=handle_dlg_complete)
+
+	def do_broadcast_info(self, evt):
+		evt.Skip()
+		if self.publish_session:
+			self.broadcast_info['publish_clients'] = self.publish_session.clients
+		if self.subscribe_session:
+			self.broadcast_info['subscribe_clients'] = self.subscribe_session.clients
+		# Translators: Title of the connect dialog.
+		dlg = dialogs.BroadcastInfoDialog(parent=gui.mainFrame, id=wx.ID_ANY, title=_("Broadcast Info"), broadcast_info=self.broadcast_info)
+		def handle_dlg_complete(dlg_result):
+			pass
+		gui.runScriptModalDialog(dlg, callback=handle_dlg_complete)
+
+	def connect_as_subscribe(self, address, key):
+		key = 'publish_' +key
+		transport = RelayTransport(address=address, serializer=serializer.JSONSerializer(), channel=key, connection_type='master')
+		self.subscribe_session = SubscribeSession(transport=transport, local_machine=self.local_machine)
+		transport.callback_manager.register_callback('transport_connected', self.on_connected_as_subscribe)
+		transport.callback_manager.register_callback('transport_disconnected', self.on_disconnected_as_subscribe)
+		self.subscribe_transport = transport
+		self.subscribe_transport.reconnector_thread.start()
+
+	def disconnect_as_subscribe(self):
+		self.subscribe_transport.close()
+		self.subscribe_transport = None
+		self.subscribe_session = None
+
+	def connect_as_publish(self, address, key):
+		key = 'publish_' +key
+		transport = RelayTransport(serializer=serializer.JSONSerializer(), address=address, channel=key, connection_type='slave')
+		self.publish_session = PublishSession(transport=transport, local_machine=self.local_machine)
+		transport.callback_manager.register_callback('transport_connected', self.on_connected_as_publish)
+		self.publish_transport = transport
+		self.publish_transport.reconnector_thread.start()
+		self.broadcast_item.Enable(False)
+		self.broadcast_info_item.Enable(True)
+		self.unpublish_item.Enable(True)
+
+	def disconnect_as_publish(self):
+		self.publish_transport.close()
+		self.publish_transport = None
+		self.publish_session = None
+
+	# using transport
+	def on_connected_as_subscribe(self):
+		self.broadcast_item.Enable(False)
+		self.broadcast_info_item.Enable(True)
+		self.unsubscribe_item.Enable(True)
+		# Translators: Presented when connected to the remote computer.
+		ui.message(_("Subscribe connected!"))
+		beep_sequence.beep_sequence_async((440, 60), (660, 60))
+
+	def on_disconnected_as_subscribe(self):
+		# Translators: Presented when connection to a remote computer was interupted.
+		ui.message(_("Subscribe connection interrupted"))
+
+	def on_connected_as_publish(self):
+		log.info("publish connected")
+		beep_sequence.beep_sequence_async((720, 100), 50, (720, 100), 50, (720, 100))
+		# Translators: Presented in direct (client to server) remote connection when the controlled computer is ready.
+		speech.speakMessage(_("publish connected"))
+
+	# using item
+	def on_unpublish_item(self, evt):
+		evt.Skip()
+		self.unpublish()
+
+	def unpublish(self):
+		if self.publish_session is None:
+			return
+		if self.publish_transport is not None:
+			self.disconnect_as_publish()
+		beep_sequence.beep_sequence_async((660, 60), (440, 60))
+		self.broadcast_item.Enable(True)
+		self.broadcast_info_item.Enable(False)
+		self.unpublish_item.Enable(False)
+
+	def on_unsubscribe_item(self, evt):
+		evt.Skip()
+		self.unsubscribe()
+
+	def unsubscribe(self):
+		if self.subscribe_session is None:
+			return
+		if self.subscribe_transport is not None:
+			self.disconnect_as_subscribe()
+		beep_sequence.beep_sequence_async((660, 60), (440, 60))
+		self.broadcast_item.Enable(True)
+		self.broadcast_info_item.Enable(False)
+		self.unsubscribe_item.Enable(False)
+
 	__gestures = {
 		"kb:alt+NVDA+pageDown": "disconnect",
 		"kb:control+shift+NVDA+c": "push_clipboard",
 	}
-
-
